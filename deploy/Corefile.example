@@ -1,0 +1,7 @@
+infra.example.com:53 {
+    file /var/lib/coredns/zones/infra.example.com.db {
+        reload 1s
+        reload_by_mtime
+    }
+    errors
+}

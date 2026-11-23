@@ -1,0 +1,15 @@
+[Unit]
+Description=CoreDNS internal DNS service
+
+[Service]
+User=coredns
+Group=coredns
+ExecStart=/usr/local/bin/coredns -conf /etc/dns-manager/Corefile
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+bundle=${1:?usage: install-node NODE_BUNDLE INSTALL_DIRECTORY}
+destination=${2:?installation directory required}
+templates=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+for name in .env agent.env Corefile zones/active.db tls/node.crt tls/node.key tls/controller-ca.crt; do
+    if [ ! -f "$bundle/$name" ]; then
+        printf 'Missing node bundle file: %s\n' "$bundle/$name" >&2
+        exit 2
+    fi
+done
+docker compose version >/dev/null
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+    echo 'Choose a new installation directory to preserve existing records.' >&2
+    exit 2
+fi
+
+umask 077
+staging=$(mktemp -d "$(dirname -- "$destination")/dns-install.XXXXXX")
+trap 'if [ -n "$staging" ]; then rm -rf -- "$staging"; fi' EXIT
+mkdir -- "$staging/zones" "$staging/tls"
+cp -- "$templates/node.compose.yaml" "$staging/compose.yaml"
+for name in .env agent.env Corefile zones/active.db tls/node.crt tls/node.key tls/controller-ca.crt; do
+    cp -- "$bundle/$name" "$staging/$name"
+done
+images=$(cd "$staging" && docker compose config --images)
+printf '%s\n' "$images" | while IFS= read -r image; do
+    docker pull "$image" || exit 1
+done
+
+mv -nT -- "$staging" "$destination"
+if [ -d "$staging" ]; then
+    echo 'Installation directory already exists.' >&2
+    exit 2
+fi
+staging=
+cd "$destination"
+if ! docker compose up -d --pull never; then
+    echo 'Files are installed. Fix the startup error, then run docker compose up -d --pull never in the installation directory.' >&2
+    exit 1
+fi

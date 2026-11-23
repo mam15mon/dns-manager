@@ -1,0 +1,82 @@
+#!/bin/bash
+set -euo pipefail
+
+project=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+coredns=$(realpath -- "${1:?usage: vip-failover COREDNS_BINARY}")
+work=$(mktemp -d)
+name=dns-vip-test-$$
+base=${ALPINE_IMAGE:-alpine:3.23}
+subnet=${VIP_TEST_SUBNET:-172.31.247}
+vip=$subnet.53
+zone=infra.example.com.
+cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        for node in a b; do
+            docker exec "$name-$node" cat /tmp/keepalived.log 2>/dev/null || true
+        done
+    fi
+    for node in a b client; do docker container rm -f "$name-$node" >/dev/null 2>&1 || true; done
+    docker network rm "$name" >/dev/null 2>&1 || true
+    docker image rm "$name" >/dev/null 2>&1 || true
+    rm -rf -- "$work"
+}
+trap cleanup EXIT
+
+printf 'FROM %s\nRUN apk add --no-cache keepalived bind-tools && addgroup -S coredns && adduser -S -G coredns coredns\n' "$base" |
+    docker build -f - -t "$name" "$work"
+docker network create --internal --subnet "$subnet.0/24" "$name" >/dev/null
+
+start_services() {
+    docker exec -d "$1" coredns -conf /lab/Corefile
+    docker exec -d "$1" sh -c \
+        'keepalived --dont-fork --log-console --use-file=/lab/keepalived.conf >/tmp/keepalived.log 2>&1'
+}
+for node in a b; do
+    if [ "$node" = a ]; then
+        local_ip=$subnet.11 peer=$subnet.12 priority=110 marker=192.0.2.11
+    else
+        local_ip=$subnet.12 peer=$subnet.11 priority=100 marker=192.0.2.12
+    fi
+    mkdir "$work/$node"
+    printf '%s\n' 'infra.example.com:53 {' '    file /lab/zone.db' '}' > "$work/$node/Corefile"
+    cp "$project/examples/zone.db" "$work/$node/zone.db"
+    printf 'node IN A %s\n' "$marker" >> "$work/$node/zone.db"
+    sed -e "s/10.10.0.11/$local_ip/" -e "s/10.10.0.12/$peer/" \
+        -e "s/10.10.0.53/$vip/" -e "s/priority 110/priority $priority/" \
+        "$project/deploy/keepalived.conf.example" > "$work/$node/keepalived.conf"
+
+    docker run -d --name "$name-$node" --network "$name" --ip "$local_ip" \
+        --cap-add NET_ADMIN --cap-add NET_RAW \
+        -v "$work/$node:/lab:ro" -v "$coredns:/usr/local/bin/coredns:ro" \
+        -v "$project/deploy/check-coredns:/usr/local/libexec/check-coredns:ro" \
+        "$name" sleep infinity >/dev/null
+    start_services "$name-$node"
+done
+
+docker run -d --name "$name-client" --network "$name" "$name" sleep infinity >/dev/null
+query() {
+    docker exec "$name-client" dig "@$vip" "$1.$zone" A "$2" +short +time=1 +tries=1 2>/dev/null
+}
+expect() {
+    for attempt in $(seq 1 20); do
+        if [ "$(query node +notcp || true)" = "$1" ] && [ "$(query node +tcp || true)" = "$1" ]; then
+            [ "$(query git +notcp)" = 192.0.2.20 ]
+            [ "$(query git +tcp)" = 192.0.2.20 ]
+            return 0
+        fi
+        sleep .5
+    done
+    printf 'VIP did not answer from node %s\n' "$1" >&2
+    return 1
+}
+expect 192.0.2.11
+docker exec "$name-a" pkill -x coredns
+expect 192.0.2.12
+docker exec -d "$name-a" coredns -conf /lab/Corefile
+expect 192.0.2.11
+docker restart --time 1 "$name-a" "$name-b" >/dev/null
+start_services "$name-a"
+start_services "$name-b"
+expect 192.0.2.11
+printf 'PASS: VIP failover, failback and isolated dual-node restart over UDP and TCP\n'

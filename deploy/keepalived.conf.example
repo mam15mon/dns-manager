@@ -1,0 +1,33 @@
+# Copy to both DNS nodes and edit the interface, addresses, and priority.
+# On node B, exchange unicast_src_ip and unicast_peer and use priority 100.
+global_defs {
+    enable_script_security
+}
+
+vrrp_script check_coredns {
+    script "/usr/local/libexec/check-coredns infra.example.com."
+    user coredns
+    interval 3
+    timeout 3
+    init_fail
+    fall 2
+    rise 2
+}
+
+vrrp_instance DNS_VIP {
+    state BACKUP
+    interface eth0
+    virtual_router_id 53
+    priority 110
+    advert_int 1
+    unicast_src_ip 10.10.0.11
+    unicast_peer {
+        10.10.0.12
+    }
+    virtual_ipaddress {
+        10.10.0.53/24
+    }
+    track_script {
+        check_coredns
+    }
+}

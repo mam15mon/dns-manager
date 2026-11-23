@@ -1,0 +1,18 @@
+{
+  "Zones": [
+    {
+      "Name": "infra.example.com.",
+      "Nameserver": "ns.infra.example.com.",
+      "Contact": "hostmaster.infra.example.com.",
+      "InitialSerial": 1,
+      "InitialRecords": [
+        {"Name": "ns", "Type": "A", "Value": "192.0.2.53", "TTL": 60},
+        {"Name": "git", "Type": "A", "Value": "192.0.2.20", "TTL": 60}
+      ],
+      "Targets": [
+        {"Name": "dns-a1", "Region": "机房 A", "URL": "https://dns-a1.example.com:8443/v1/zone", "TokenEnv": "DNS_A1_TOKEN"},
+        {"Name": "dns-a2", "Region": "机房 A", "URL": "https://dns-a2.example.com:8443/v1/zone", "TokenEnv": "DNS_A2_TOKEN"}
+      ]
+    }
+  ]
+}

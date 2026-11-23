@@ -1,0 +1,28 @@
+services:
+  controller:
+    image: ${DNS_CONTROLLER_IMAGE:?DNS_CONTROLLER_IMAGE is required}
+    pull_policy: never
+    restart: unless-stopped
+    network_mode: host
+    env_file: [controller.env]
+    command:
+      - -listen
+      - ${CONTROLLER_LISTEN:?CONTROLLER_LISTEN is required}
+      - -config
+      - /config/controller.json
+      - -state
+      - /state/releases.json
+      - -tls-cert
+      - /tls/controller.crt
+      - -tls-key
+      - /tls/controller.key
+      - -node-ca
+      - /tls/node-ca.crt
+      - -node-client-cert
+      - /tls/controller-client.crt
+      - -node-client-key
+      - /tls/controller-client.key
+    volumes:
+      - ./controller.json:/config/controller.json:ro
+      - ./state:/state
+      - ./tls:/tls:ro

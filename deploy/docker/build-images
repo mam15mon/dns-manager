@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+registry=${1:?usage: build-images REGISTRY TAG COREDNS_BINARY}
+tag=${2:?version tag required}
+coredns=${3:?Linux CoreDNS binary required}
+case "$tag" in latest) echo 'Use a release tag, not latest' >&2; exit 2;; esac
+project=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+context=$(mktemp -d)
+trap 'rm -rf -- "$context"' EXIT
+cp -- "$coredns" "$context/coredns"
+cd "$project"
+CGO_ENABLED=0 GOOS=linux go build -trimpath -o "$context/dns-controller" ./controller
+CGO_ENABLED=0 GOOS=linux go build -trimpath -o "$context/dns-node" ./node
+for name in coredns dns-controller dns-node; do
+    chmod 0755 "$context/$name"
+    printf 'FROM scratch\nCOPY %s /bin/%s\nENTRYPOINT ["/bin/%s"]\n' "$name" "$name" "$name" |
+        docker build -f - -t "$registry/$name:$tag" "$context"
+done

@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Create a node installation bundle and its controller configuration."""
+import argparse
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import subprocess
+import tempfile
+
+
+def port(value):
+    value = int(value)
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError("port must be 1–65535")
+    return value
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--region", required=True)
+    parser.add_argument("--ip", type=ipaddress.ip_address, required=True)
+    parser.add_argument("--zone", required=True)
+    parser.add_argument("--zone-file", type=Path, required=True)
+    parser.add_argument("--registry", required=True)
+    parser.add_argument("--tag", required=True)
+    parser.add_argument("--node-ca", type=Path, required=True)
+    parser.add_argument("--node-ca-key", type=Path, required=True)
+    parser.add_argument("--controller-ca", type=Path, required=True)
+    parser.add_argument("--agent-port", type=port, default=8443)
+    parser.add_argument("--dns-port", type=port, default=53)
+    parser.add_argument("output", type=Path)
+    args = parser.parse_args()
+
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9-]{0,62}", args.name):
+        parser.error("name must be a hostname label")
+    zone = args.zone.rstrip(".").lower()
+    if len(zone) > 253 or not all(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+        for label in zone.split(".")
+    ):
+        parser.error("zone must be a DNS name")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.:[\]-]*(?:/[a-z0-9_-]+)*", args.registry):
+        parser.error("invalid registry address")
+    if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}", args.tag) or args.tag == "latest":
+        parser.error("use a fixed image tag")
+
+    os.umask(0o077)
+    with tempfile.TemporaryDirectory(prefix=".node-", dir=args.output.parent) as staging:
+        staging = Path(staging)
+        bundle = staging / "bundle"
+        tls = bundle / "tls"
+        tls.mkdir(parents=True)
+        (bundle / "zones").mkdir()
+        shutil.copyfile(args.zone_file, bundle / "zones/active.db")
+        shutil.copyfile(args.controller_ca, tls / "controller-ca.crt")
+        addr = f"[{args.ip}]" if args.ip.version == 6 else str(args.ip)
+        token_env = "DNS_NODE_" + args.name.upper().replace("-", "_") + "_TOKEN"
+        token = secrets.token_hex(32)
+        command = ["openssl", "req", "-new", "-newkey", "ec",
+                   "-pkeyopt", "ec_paramgen_curve:P-256", "-noenc",
+                   "-subj", f"/CN={args.name}", "-keyout", tls / "node.key",
+                   "-out", staging / "node.csr"]
+        subprocess.run(command, check=True)
+        extensions = staging / "extensions"
+        extensions.write_text(f"subjectAltName=IP:{args.ip}\nextendedKeyUsage=serverAuth\n"
+                              "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n")
+        subprocess.run(["openssl", "x509", "-req", "-in", staging / "node.csr",
+                        "-CA", args.node_ca, "-CAkey", args.node_ca_key,
+                        "-set_serial", "0x" + secrets.token_hex(16),
+                        "-extfile", extensions, "-days", "365", "-out", tls / "node.crt"],
+                       check=True)
+
+        (bundle / ".env").write_text(
+            f"COREDNS_IMAGE={args.registry}/coredns:{args.tag}\n"
+            f"DNS_NODE_IMAGE={args.registry}/dns-node:{args.tag}\n"
+            f"ZONE={zone}.\nDNS_ADDRESS=127.0.0.1:{args.dns_port}\n"
+            f"AGENT_LISTEN={addr}:{args.agent_port}\n"
+        )
+        (bundle / "agent.env").write_text(f"DNS_NODE_TOKEN={token}\n")
+        (bundle / "Corefile").write_text(
+            f"{zone}:{args.dns_port} {{\n"
+            "    file /zones/active.db {\n        reload 1s\n        reload_by_mtime\n"
+            "    }\n    errors\n}\n"
+        )
+        (staging / "controller-target.json").write_text(json.dumps({
+            "Name": args.name, "Region": args.region, "URL": f"https://{addr}:{args.agent_port}/v1/zone",
+            "TokenEnv": token_env,
+        }, ensure_ascii=False, indent=2) + "\n")
+        (staging / "controller-node.env").write_text(f"{token_env}={token}\n")
+        (staging / "node.csr").unlink()
+        extensions.unlink()
+
+        # Reserve a new destination and leave an existing installation intact.
+        args.output.mkdir()
+        for item in staging.iterdir():
+            item.rename(args.output / item.name)
+
+
+if __name__ == "__main__":
+    main()

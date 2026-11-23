@@ -1,0 +1,8 @@
+infra.example.com:1053 {
+    bind 127.0.0.1
+    file zone.db {
+        reload 1s
+        reload_by_mtime
+    }
+    errors
+}

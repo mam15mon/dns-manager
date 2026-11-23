@@ -1,0 +1,6 @@
+$ORIGIN infra.example.com.
+$TTL 60
+@ IN SOA ns.infra.example.com. hostmaster.infra.example.com. 1 60 30 86400 60
+@ IN NS ns.infra.example.com.
+ns IN A 192.0.2.53
+git IN A 192.0.2.20

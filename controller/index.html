@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>内网 DNS 管理</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f0f3f7;color:#172538;font:15px system-ui,sans-serif}
+header{background:#142b44;color:white;padding:20px max(24px,calc((100vw - 1120px)/2));font-size:20px;font-weight:650}
+main{max-width:1168px;margin:auto;padding:24px;display:grid;gap:16px}
+section{background:white;border:1px solid #dce4ed;border-radius:10px;padding:18px;overflow:auto}
+h2{font-size:17px;margin:0 0 14px}.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+table{width:100%;border-collapse:collapse;margin:12px 0;text-align:left}th,td{padding:9px;border-bottom:1px solid #e3e9f0}th{color:#41546a;background:#f5f8fb}
+input,select,button{padding:7px 10px;border:1px solid #bdcbd8;border-radius:5px;background:white;color:inherit;font:inherit}
+input{width:100%;min-width:70px}button{cursor:pointer}.primary{background:#165db2;color:white;border-color:#165db2}
+button:disabled{opacity:.55;cursor:default}#notice{min-height:1.4em;color:#38526e}pre{white-space:pre-wrap}
+</style>
+<header>内网 DNS 管理</header>
+<main>
+<section>
+<div class="toolbar"><label for="zone">DNS 区域</label><select id="zone"></select><button id="refresh">刷新状态</button></div>
+</section>
+<section>
+<h2>解析记录</h2>
+<table><thead><tr><th>名称</th><th>类型</th><th>记录值</th><th>TTL（秒）</th><th>操作</th></tr></thead><tbody id="records"></tbody></table>
+<div class="toolbar"><button id="add">添加记录</button><button class="primary" id="publish">预览并发布</button></div>
+<p id="notice" role="status"></p>
+</section>
+<section>
+<h2>节点发布状态</h2>
+<table><thead><tr><th>机房</th><th>节点</th><th>状态</th><th>详情</th></tr></thead><tbody id="nodes"></tbody></table>
+</section>
+<section>
+<h2>发布历史</h2>
+<table><thead><tr><th>版本</th><th>发布时间</th><th>操作</th></tr></thead><tbody id="history"></tbody></table>
+</section>
+</main>
+<dialog id="preview"><h2>确认发布</h2><pre id="diff"></pre><div class="toolbar"><button id="cancel">取消</button><button class="primary" id="confirm">确认发布</button></div></dialog>
+<script>
+const el = id => document.getElementById(id);
+let zones = [], loadedZone, pending, submitting = false;
+const selected = () => zones.find(z => z.Name === el('zone').value);
+const latest = z => (z?.History || []).at(-1);
+const notice = value => { el('notice').textContent = value; };
+function appendRow(parent, values) {
+  const row = parent.insertRow();
+  for (const value of values) {
+    const cell = row.insertCell();
+    if (value instanceof Node) cell.append(value);
+    else cell.textContent = value;
+  }
+  return row;
+}
+function button(text, action) {
+  const b = document.createElement('button');
+  b.textContent = text;
+  b.onclick = action;
+  return b;
+}
+function addRecord(r = {Name:'', Type:'A', Value:'', TTL:60}) {
+  const input = (value, label, type = 'text') => {
+    const control = document.createElement('input');
+    control.type = type;
+    control.value = value;
+    control.setAttribute('aria-label', label);
+    return control;
+  };
+  const type = document.createElement('select');
+  type.setAttribute('aria-label', '类型');
+  for (const name of ['A','AAAA','CNAME','PTR']) type.add(new Option(name, name));
+  type.value = r.Type;
+  const row = appendRow(el('records'), [input(r.Name,'名称'), type, input(r.Value,'记录值'),
+    input(r.TTL,'TTL','number'), button('删除', () => row.remove())]);
+}
+function render(resetRecords) {
+  const z = selected();
+  const current = latest(z);
+  if (resetRecords || loadedZone !== z?.Name) {
+    el('records').replaceChildren();
+    for (const r of current?.Records || z?.InitialRecords || []) addRecord(r);
+    loadedZone = z?.Name;
+  }
+  el('nodes').replaceChildren();
+  for (const t of z?.Targets || []) {
+    const status = current?.Nodes?.[t.Name];
+    const previous = (z?.History || []).findLast(v => v.Nodes?.[t.Name]?.Applied);
+    const detail = [status?.Error, !status?.Applied && previous ? '上次确认版本 '+previous.Serial : '']
+      .filter(Boolean).join(' · ');
+    appendRow(el('nodes'), [t.Region,t.Name,status?.Applied ? '已生效 · '+current.Serial :
+      status?.Error ? '失败，等待重试' : current ? '待发布' : '尚未发布',detail]);
+  }
+  el('history').replaceChildren();
+  for (const version of [...(z?.History || [])].reverse()) {
+    appendRow(el('history'), [version.Serial,new Date(version.Created).toLocaleString('zh-CN'),
+      button('回滚到此版本', () => preview(version.Records || [],version.Serial))]);
+  }
+  if (current && z.InitialSerial) {
+    appendRow(el('history'), [z.InitialSerial,'接入时的记录',
+      button('回滚到初始版本', () => preview(z.InitialRecords || [],z.InitialSerial))]);
+  }
+}
+async function refresh(reset = false) {
+  const response = await fetch('/api/releases');
+  if (!response.ok) throw new Error('读取状态失败');
+  zones = (await response.json()).sort((a,b) => a.Name.localeCompare(b.Name));
+  const select = el('zone'), previous = select.value;
+  select.replaceChildren(...zones.map(z => new Option(z.Name,z.Name)));
+  if (zones.some(z => z.Name === previous)) select.value = previous;
+  render(reset);
+}
+function preview(records, rollback = 0) {
+  const z = selected();
+  if (!z || submitting) return;
+  const line = r => [r.Name, r.TTL, r.Type, r.Value].join(' ');
+  const before = new Set((latest(z)?.Records || z.InitialRecords || []).map(line));
+  const after = new Set(records.map(line));
+  const changes = [...[...before].filter(r => !after.has(r)).map(r => '− '+r),
+    ...[...after].filter(r => !before.has(r)).map(r => '+ '+r)];
+  el('diff').textContent = [z.Name, ...(changes.length ? changes : ['记录内容无变化'])].join('\n');
+  pending = {Zone:z.Name, Records:records, Rollback:rollback};
+  el('preview').showModal();
+}
+el('zone').onchange = () => render(true);
+el('refresh').onclick = () => refresh().catch(e => notice(e.message));
+el('add').onclick = () => addRecord();
+el('publish').onclick = () => {
+  const records = Array.from(el('records').rows, row => {
+    const [name,type,value,ttl] = row.querySelectorAll('input,select');
+    return {Name:name.value.trim(),Type:type.value,Value:value.value.trim(),TTL:Number(ttl.value)};
+  });
+  preview(records);
+};
+el('cancel').onclick = () => el('preview').close();
+el('confirm').onclick = async () => {
+  if (submitting) return;
+  submitting = true;
+  el('confirm').disabled = true;
+  try {
+    const response = await fetch('/api/releases', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(pending)});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || '发布失败');
+    el('preview').close();
+    notice('已提交版本 '+result.serial+'，请查看节点状态。');
+    await refresh(true);
+  } catch (e) {
+    el('preview').close();
+    notice(e.message);
+  } finally {
+    submitting = false;
+    el('confirm').disabled = false;
+  }
+};
+refresh(true).catch(e => notice(e.message));
+setInterval(() => { if (!submitting) refresh().catch(e => notice(e.message)); }, 3000);
+</script>
+</html>

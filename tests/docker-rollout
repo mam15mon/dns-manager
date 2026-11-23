@@ -1,0 +1,71 @@
+#!/bin/bash
+set -euo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+binary=$(realpath -- "${1:?usage: docker-rollout COREDNS_BINARY}")
+deploy=$root/deploy/docker
+work=$(mktemp -d)
+registry_port=${REGISTRY_PORT:-19500}
+node_dns_port=${NODE_DNS_PORT:-19553}
+node_api_port=${NODE_API_PORT:-19443}
+controller_port=${CONTROLLER_PORT:-19444}
+registry=localhost:$registry_port
+tag=integration-$$
+node_project=dns-node-smoke-$$
+controller_project=dns-controller-smoke-$$
+registry_name=dns-registry-smoke-$$
+cleanup() {
+    docker compose -p "$node_project" -f "$work/node/compose.yaml" down >/dev/null 2>&1 || true
+    docker compose -p "$controller_project" -f "$work/controller/compose.yaml" down >/dev/null 2>&1 || true
+    docker rm -f "$registry_name" >/dev/null 2>&1 || true
+    for image in coredns dns-node dns-controller; do
+        docker image rm "$registry/$image:$tag" >/dev/null 2>&1 || true
+    done
+    rm -rf "$work"
+}
+trap cleanup EXIT
+docker compose version >/dev/null
+"$deploy/build-images" "$registry" "$tag" "$binary"
+docker run -d --name "$registry_name" -p "127.0.0.1:$registry_port:5000" registry:3 >/dev/null
+for i in $(seq 1 20); do curl -fsS "http://127.0.0.1:$registry_port/v2/" >/dev/null && break; sleep .25; done
+for image in coredns dns-node dns-controller; do docker push "$registry/$image:$tag" >/dev/null; done
+for image in coredns dns-node; do docker image rm "$registry/$image:$tag" >/dev/null; done
+umask 077
+mkdir -p "$work/controller/state" "$work/controller/tls"
+cd "$work"
+openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj /CN=localhost -addext subjectAltName=IP:127.0.0.1 -keyout key -out cert >/dev/null 2>&1
+cp cert controller/tls/controller.crt
+cp key controller/tls/controller.key
+cp cert controller/tls/controller-client.crt
+cp key controller/tls/controller-client.key
+cp cert controller/tls/node-ca.crt
+"$deploy/prepare-node" --name node --region lab --ip 127.0.0.1 --zone infra.example.com \
+    --zone-file "$root/examples/zone.db" --registry "$registry" --tag "$tag" \
+    --node-ca cert --node-ca-key key --controller-ca cert \
+    --agent-port "$node_api_port" --dns-port "$node_dns_port" prepared
+openssl verify -CAfile cert -verify_ip 127.0.0.1 prepared/bundle/tls/node.crt
+password=$(openssl rand -hex 24)
+COMPOSE_PROJECT_NAME=$node_project "$deploy/install-node" "$work/prepared/bundle" "$work/node"
+cp "$deploy/controller.compose.yaml" controller/compose.yaml
+printf 'DNS_CONTROLLER_IMAGE=%s\nCONTROLLER_LISTEN=127.0.0.1:%s\n' "$registry/dns-controller:$tag" "$controller_port" > controller/.env
+printf 'DNS_ADMIN_PASSWORD=%s\n' "$password" > controller/controller.env
+cat prepared/controller-node.env >> controller/controller.env
+python3 - "$root/examples/controller.json" <<'PY'
+import json, pathlib, sys
+config = json.loads(pathlib.Path(sys.argv[1]).read_text())
+config['Zones'][0]['Targets'] = [json.loads(pathlib.Path('prepared/controller-target.json').read_text())]
+pathlib.Path('controller/controller.json').write_text(json.dumps(config))
+PY
+docker compose -p "$controller_project" -f controller/compose.yaml up -d --pull never
+for i in $(seq 1 20); do curl -fsS --cacert cert -u "admin:$password" "https://127.0.0.1:$controller_port/api/releases" >/dev/null && break; sleep .25; done
+curl -fsS --cacert cert -u "admin:$password" -H 'Content-Type: application/json' -d '{"Zone":"infra.example.com.","Records":[{"Name":"git","Type":"A","TTL":60,"Value":"192.0.2.21"}]}' "https://127.0.0.1:$controller_port/api/releases"
+query() { dig @127.0.0.1 -p "$node_dns_port" git.infra.example.com A +short +time=1 +tries=1 "$@"; }
+for i in $(seq 1 20); do [ "$(query)" = 192.0.2.21 ] && break; sleep .25; done
+[ "$(query)" = 192.0.2.21 ]
+docker stop "$registry_name" >/dev/null
+docker compose -p "$controller_project" -f controller/compose.yaml stop >/dev/null
+docker compose -p "$node_project" -f node/compose.yaml down >/dev/null
+docker compose -p "$node_project" -f node/compose.yaml up -d --pull never
+for i in $(seq 1 20); do [ "$(query)" = 192.0.2.21 ] && break; sleep .25; done
+[ "$(query)" = 192.0.2.21 ]
+[ "$(query +tcp)" = 192.0.2.21 ]
+printf '\nPASS: registry push/pull, one-command Docker setup, IP mTLS publication, offline container recreation (UDP/TCP)\n'

@@ -1,0 +1,35 @@
+services:
+  coredns:
+    image: ${COREDNS_IMAGE:?COREDNS_IMAGE is required}
+    pull_policy: never
+    restart: unless-stopped
+    network_mode: host
+    command: ["-conf", "/config/Corefile"]
+    volumes:
+      - ./Corefile:/config/Corefile:ro
+      - ./zones:/zones:ro
+  agent:
+    image: ${DNS_NODE_IMAGE:?DNS_NODE_IMAGE is required}
+    pull_policy: never
+    restart: unless-stopped
+    network_mode: host
+    depends_on: [coredns]
+    env_file: [agent.env]
+    command:
+      - -zone
+      - ${ZONE:?ZONE is required}
+      - -file
+      - /zones/active.db
+      - -dns
+      - ${DNS_ADDRESS:-127.0.0.1:53}
+      - -listen
+      - ${AGENT_LISTEN:?AGENT_LISTEN is required}
+      - -tls-cert
+      - /tls/node.crt
+      - -tls-key
+      - /tls/node.key
+      - -client-ca
+      - /tls/controller-ca.crt
+    volumes:
+      - ./zones:/zones
+      - ./tls:/tls:ro

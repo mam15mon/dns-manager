@@ -1,0 +1,16 @@
+services:
+  registry:
+    image: ${REGISTRY_IMAGE:?Set a pinned Distribution registry image}
+    restart: unless-stopped
+    ports:
+      - "${REGISTRY_LISTEN:?Set the management IP and port}:5000"
+    environment:
+      REGISTRY_HTTP_TLS_CERTIFICATE: /tls/registry.crt
+      REGISTRY_HTTP_TLS_KEY: /tls/registry.key
+      REGISTRY_AUTH: htpasswd
+      REGISTRY_AUTH_HTPASSWD_REALM: Internal DNS images
+      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
+    volumes:
+      - ./registry-data:/var/lib/registry
+      - ./registry-tls:/tls:ro
+      - ./registry-auth:/auth:ro

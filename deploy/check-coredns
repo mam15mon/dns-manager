@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+zone=${1:?zone required}
+server=${2:-127.0.0.1}
+port=${3:-53}
+for transport in +notcp +tcp; do
+    answer=$(dig "@$server" -p "$port" "$zone" SOA "$transport" +norecurse +time=1 +tries=1)
+    printf '%s\n' "$answer" | awk '
+        /^;; flags:/ && /[[:space:]]aa[[:space:];]/ { authoritative=1 }
+        $4 == "SOA" { soa=1 }
+        END { exit !(authoritative && soa) }
+    '
+done
